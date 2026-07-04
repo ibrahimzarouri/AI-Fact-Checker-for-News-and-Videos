@@ -1,73 +1,73 @@
 # AI Fact Checker for News & Videos
 
-Eine Chrome-Erweiterung zur Überprüfung von Fakten und Analyse von Nachrichtenartikeln und Videos (YouTube/TikTok) mit OpenAI und ClaimBuster APIs.
+A Chrome extension for fact-checking and analyzing news articles and videos (YouTube/TikTok) using the OpenAI and ClaimBuster APIs.
 
-**Funktionsweise:** Artikel werden direkt von der Seite extrahiert; bei Videos wird die Tonspur aufgenommen, mit OpenAI Whisper transkribiert und anschließend – wie bei Artikeln – parallel mit GPT-4.1-nano und ClaimBuster auf Faktentreue, Bias und Manipulationstechniken analysiert. Die Ergebnisse erscheinen in einem Panel direkt auf der Seite.
+**How it works:** Articles are extracted directly from the page; for videos, the audio track is recorded, transcribed with OpenAI Whisper, and then — just like articles — analyzed in parallel with GPT-4.1-nano and ClaimBuster for factual accuracy, bias, and manipulation techniques. The results appear in a panel directly on the page.
 
-## Installation der Erweiterung
+## Installing the Extension
 
-### Schritt 1: Repository herunterladen
+### Step 1: Download the repository
 
 ```bash
 git clone https://github.com/ibrahimzarouri/AI-Fact-Checker-for-News-and-Videos.git
 ```
 
-Oder als ZIP herunterladen (Code → Download ZIP) und entpacken.
+Or download it as a ZIP (Code → Download ZIP) and extract it.
 
-### Schritt 2: API-Schlüssel konfigurieren
+### Step 2: Configure API keys
 
-1. Kopieren Sie die Datei `config.template.js` und benennen Sie die Kopie in `config.js` um
-2. Öffnen Sie `config.js` mit einem Texteditor
-3. Fügen Sie Ihre API-Schlüssel ein:
+1. Copy the file `config.template.js` and rename the copy to `config.js`
+2. Open `config.js` in a text editor
+3. Insert your API keys:
 
 ```javascript
 const API_KEYS = {
-    OPENAI_API_KEY: 'hier-ihren-openai-api-schlüssel-einfügen',
-    CLAIMBUSTER_API_KEY: 'hier-ihren-claimbuster-api-schlüssel-einfügen' // Optional
+    OPENAI_API_KEY: 'insert-your-openai-api-key-here',
+    CLAIMBUSTER_API_KEY: 'insert-your-claimbuster-api-key-here' // Optional
 };
 ```
 
-4. Speichern Sie die Datei
+4. Save the file
 
-**API-Schlüssel erhalten:**
-- OpenAI API (erforderlich): https://platform.openai.com/api-keys
+**Getting API keys:**
+- OpenAI API (required): https://platform.openai.com/api-keys
 - ClaimBuster API (optional): https://idir.uta.edu/claimbuster/api/
 
-> `config.js` steht in der `.gitignore` und wird niemals mit hochgeladen – Ihre Schlüssel bleiben lokal.
+> `config.js` is listed in `.gitignore` and is never uploaded — your keys stay local.
 
-### Schritt 3: Chrome-Erweiterung laden
+### Step 3: Load the Chrome extension
 
-1. Öffnen Sie Google Chrome
-2. Gehen Sie zu `chrome://extensions/` (in die Adresszeile eingeben)
-3. Aktivieren Sie den **Entwicklermodus** (Toggle oben rechts)
-4. Klicken Sie auf **"Ungepackte Erweiterung laden"**
-5. Wählen Sie den Projektordner aus (der Ordner mit der `manifest.json`)
+1. Open Google Chrome
+2. Go to `chrome://extensions/` (type it into the address bar)
+3. Enable **Developer mode** (toggle in the top right)
+4. Click **"Load unpacked"**
+5. Select the project folder (the folder containing `manifest.json`)
 
-### Schritt 4: Erweiterung verwenden
+### Step 4: Use the extension
 
-1. Besuchen Sie eine unterstützte Nachrichtenseite (z.B. bild.de, spiegel.de, bbc.com) oder ein Video auf YouTube/TikTok
-2. Die Analyse wird automatisch gestartet – Ergebnisse über den schwebenden Button öffnen
+1. Visit a supported news site (e.g. bild.de, spiegel.de, bbc.com) or a video on YouTube/TikTok
+2. The analysis starts automatically — open the results via the floating button
 
-## Wichtige Dateien
+## Key Files
 
-| Datei | Zweck |
+| File | Purpose |
 |---|---|
-| `manifest.json` | Erweiterungs-Konfiguration (Manifest V3) |
-| `background.js` | Hauptlogik und API-Aufrufe (OpenAI, Whisper, ClaimBuster) |
-| `content.js` | Website-Integration, Audio-Extraktion und Ergebnis-Panel |
-| `styles.css` | Styling des Analyse-Panels |
-| `config.template.js` | Vorlage für API-Schlüssel |
-| `config.js` | Ihre API-Schlüssel (von Ihnen erstellt, nicht im Repository) |
-| `ground_truth/` | Evaluationsdatensatz mit annotierten Artikeln |
-| `popup.html` / `popup.js` | Deaktiviert (minimale, direkte Bedienung) |
+| `manifest.json` | Extension configuration (Manifest V3) |
+| `background.js` | Core logic and API calls (OpenAI, Whisper, ClaimBuster) |
+| `content.js` | Website integration, audio extraction, and results panel |
+| `styles.css` | Styling of the analysis panel |
+| `config.template.js` | Template for API keys |
+| `config.js` | Your API keys (created by you, not in the repository) |
+| `ground_truth/` | Evaluation dataset with annotated articles |
+| `popup.html` / `popup.js` | Disabled (minimal, direct operation) |
 
-## Anforderungen
+## Requirements
 
-- Google Chrome Browser
-- OpenAI API Key (in `config.js` konfigurieren)
-- ClaimBuster API Key (optional, in `config.js` konfigurieren)
+- Google Chrome browser
+- OpenAI API key (configure in `config.js`)
+- ClaimBuster API key (optional, configure in `config.js`)
 
 ---
 
-Entwickelt für Bildungszwecke — Bachelorarbeit von [Ibrahim Zarouri](https://github.com/ibrahimzarouri).
-Ausführliche technische Dokumentation: siehe [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
+Developed for educational purposes — Bachelor's thesis by [Ibrahim Zarouri](https://github.com/ibrahimzarouri).
+For detailed technical documentation, see [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
