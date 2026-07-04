@@ -69,5 +69,5 @@ const API_KEYS = {
 
 ---
 
-Entwickelt für Bildungszwecke — Masterprojekt von [Ibrahim Zarouri](https://github.com/ibrahimzarouri).
+Entwickelt für Bildungszwecke — Bachelorarbeit von [Ibrahim Zarouri](https://github.com/ibrahimzarouri).
 Ausführliche technische Dokumentation: siehe [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
