@@ -75,6 +75,7 @@ let autoAnalysisTriggered = false; // Prevent multiple auto-analysis triggers
 // Ground Truth System - ADD THESE LINES
 let groundTruthData = null;
 let confidenceCalibration = null;
+let evaluationResults = null; // Parsed EVALUATION_RESULTS from ground_truth/evaluate.js
 
 // Audio extraction state management
 let isExtractingAudio = false;
@@ -224,77 +225,6 @@ function calculateRealCalibration() {
   
   console.log("CORRECTED brackets:", brackets);
   return brackets;
-}
-
-// Function to calculate confidence calibration - ADD THIS FUNCTION
-function calculateConfidenceCalibrationReal(groundTruthArticles, currentResult) {
-  try {
-    // Load real evaluation results
-    const evaluationResults = EVALUATION_RESULTS; // From evaluate.js
-    
-    if (!evaluationResults || evaluationResults.length === 0) {
-      return {
-        available: false,
-        message: "Real evaluation data not available"
-      };
-    }
-    
-    const confidence = currentResult.analysis?.confidence_score || 0;
-    const currentBracket = getConfidenceBracket(confidence);
-    
-    // Calculate real accuracy for this confidence bracket
-    const bracketsData = calculateCalibration();
-    const bracketStats = bracketsData[currentBracket];
-    
-    if (!bracketStats || bracketStats.total === 0) {
-      return {
-        available: true,
-        confidence_bracket: currentBracket,
-        actual_accuracy: 0,
-        sample_size: evaluationResults.length,
-        bracket_sample_size: 0,
-        reliability_level: 'No Data',
-        reliability_color: '#666',
-        message: `No articles in our test set had AI confidence in the ${currentBracket} range.`
-      };
-    }
-    
-    const actualAccuracy = bracketStats.accuracy;
-    const bracketSampleSize = bracketStats.total;
-    
-    // Determine reliability level based on REAL accuracy
-    let reliabilityLevel = '';
-    let reliabilityColor = '';
-    
-    if (actualAccuracy >= 80) {
-      reliabilityLevel = 'High Reliability';
-      reliabilityColor = '#34a853';
-    } else if (actualAccuracy >= 65) {
-      reliabilityLevel = 'Medium Reliability'; 
-      reliabilityColor = '#fbbc05';
-    } else {
-      reliabilityLevel = 'Lower Reliability';
-      reliabilityColor = '#ea4335';
-    }
-    
-    return {
-      available: true,
-      confidence_bracket: currentBracket,
-      actual_accuracy: actualAccuracy,
-      sample_size: evaluationResults.length,
-      bracket_sample_size: bracketSampleSize,
-      reliability_level: reliabilityLevel,
-      reliability_color: reliabilityColor,
-      message: `Based on our testing with ${evaluationResults.length} verified articles, when this AI is ${currentBracket} confident, it was correct ${actualAccuracy}% of the time (${bracketStats.correct}/${bracketSampleSize} articles).`
-    };
-    
-  } catch (error) {
-    console.error("Error calculating real confidence calibration:", error);
-    return {
-      available: false,
-      message: "Could not calculate confidence calibration from real data"
-    };
-  }
 }
 
 // Function to load and display ground truth - ADD THIS FUNCTION
@@ -452,6 +382,19 @@ function calculateRealConfidenceCalibration(currentResult) {
 let claimBusterMiniWindow = null;
 let claimBusterToggleState = false;
 let mouseLeaveTimeout = null;
+
+// Escape untrusted text (AI output, page content, error messages) before
+// interpolating it into innerHTML templates. Prevents HTML/script injection
+// through content the model echoes back from the analyzed page.
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 // Simple hash function for article content
 function hashString(str) {
@@ -691,9 +634,14 @@ function initializeVideoChangeDetection() {
         }
       } else if (CONFIG.SUPPORTED_DOMAINS.some(domain => window.location.hostname.includes(domain))) {
         // For news sites - reset if URL path changes significantly
-        const currentPath = new URL(currentPageUrl || '').pathname;
+        let currentPath = null;
+        try {
+          currentPath = new URL(currentPageUrl).pathname;
+        } catch (e) {
+          // currentPageUrl missing/unparseable - treat as changed
+        }
         const newPath = new URL(url).pathname;
-        
+
         if (currentPath !== newPath) {
           console.log('📰 Different article detected, resetting UI');
           currentPageUrl = url;
@@ -1318,7 +1266,8 @@ async function extractAudioFromNewsVideo(platform) {
               video.captureStream ? video.captureStream() : video.mozCaptureStream(),
               Math.min(video.duration * 2, 30), // Record for twice as long, max 30s
               result.format,
-              false
+              false,
+              video
             );
             
             if (longerResult.success && longerResult.audioBlob.size > 2048) {
@@ -1383,12 +1332,12 @@ async function attemptDirectStreamCapture(video) {
   }
   
   const stream = video.captureStream ? video.captureStream() : video.mozCaptureStream();
-  
+
   if (!stream || stream.getTracks().length === 0) {
     throw new Error("captureStream returned empty stream");
   }
-  
-  return await recordAudioFromStream(stream, video.duration, 'audio/webm');
+
+  return await recordAudioFromStream(stream, video.duration, 'audio/webm', false, video);
 }
 
 // Web Audio API capture attempt
@@ -1435,10 +1384,11 @@ async function attemptWebAudioCapture(video) {
   
   try {
     const result = await recordAudioFromStream(
-      stream, 
+      stream,
       Math.min(15, video.duration), // Record max 15 seconds
       'audio/webm',
-      false
+      false,
+      video
     );
     
     // IMPORTANT: Properly cleanup Web Audio API to restore video controls
@@ -1501,7 +1451,8 @@ async function extractAudioWithClone(originalVideo) {
       stream,
       Math.min(15, videoClone.duration),
       'audio/webm',
-      false
+      false,
+      videoClone
     );
     
     // Clean up
@@ -1529,7 +1480,7 @@ async function attemptConstrainedCapture(video) {
   
   // Record shorter segment to avoid issues
   const maxDuration = Math.min(video.duration, 30); // Max 30 seconds
-  return await recordAudioFromStream(stream, maxDuration, 'audio/webm');
+  return await recordAudioFromStream(stream, maxDuration, 'audio/webm', false, video);
 }
 
 // Legacy capture attempt with minimal settings
@@ -1543,11 +1494,13 @@ async function attemptLegacyCapture(video) {
   }
   
   // Record with basic MediaRecorder, no options
-  return await recordAudioFromStream(stream, Math.min(video.duration, 15), 'audio/webm', true);
+  return await recordAudioFromStream(stream, Math.min(video.duration, 15), 'audio/webm', true, video);
 }
 
 // FIXED: Enhanced audio recording with proper chunk collection
-async function recordAudioFromStream(stream, duration, mimeType, basicMode = false) {
+// videoEl is the media element the stream was captured from; recording stops
+// when the user pauses it (or after the 10 minute safety limit).
+async function recordAudioFromStream(stream, duration, mimeType, basicMode = false, videoEl = null) {
   console.log(`🎙️ Starting audio recording for ${duration}s...`);
   
   // Guard: require an audio track
@@ -1643,29 +1596,25 @@ async function recordAudioFromStream(stream, duration, mimeType, basicMode = fal
     // Start recording without timeslice to avoid fragmentation
     console.log('🎬 Starting MediaRecorder...');
     mediaRecorder.start();
-    
-    // Record for specified duration (max 15 seconds for quick analysis)
-    const recordingDuration = Math.min(duration * 1000, 15000); // 15 seconds max
-    console.log(`⏰ Will record for ${recordingDuration}ms`);
-    
-    // Stop recording when video is paused by user
+
+    // Stop recording when the user pauses the video (if we know the element)
     const handlePause = () => {
       if (mediaRecorder.state === 'recording') {
         console.log('🎬 User paused video - stopping recording');
         mediaRecorder.stop();
       }
-      video.removeEventListener('pause', handlePause);
+      if (videoEl) videoEl.removeEventListener('pause', handlePause);
     };
-    
-    video.addEventListener('pause', handlePause);
-    
+
+    if (videoEl) videoEl.addEventListener('pause', handlePause);
+
     // Fallback: Stop after 10 minutes max (safety limit)
-    const maxTimeout = setTimeout(() => {
+    setTimeout(() => {
       if (mediaRecorder.state === 'recording') {
         console.log('⏹️ Stopping recording after 10 minute safety limit');
         mediaRecorder.stop();
       }
-      video.removeEventListener('pause', handlePause);
+      if (videoEl) videoEl.removeEventListener('pause', handlePause);
     }, 10 * 60 * 1000);
   });
 }
@@ -1883,7 +1832,7 @@ async function extractAudioBasicCapture(video) {
     
     // Record with basic settings, max 5 minutes
     const duration = Math.min(video.duration, 300); // Max 5 minutes instead of 60s
-    const result = await recordAudioFromStream(stream, duration, 'audio/webm', true);
+    const result = await recordAudioFromStream(stream, duration, 'audio/webm', true, video);
     
     console.log(`✅ Basic capture completed: ${result.audioBlob?.size || 0} bytes`);
     
@@ -2799,7 +2748,7 @@ function showLoadingState(message = 'Analyzing with AI...') {
     contentDiv.innerHTML = `
       <div class="ai-loading">
         <div class="ai-loading-spinner"></div>
-        <p class="ai-loading-text">${message}</p>
+        <p class="ai-loading-text">${escapeHtml(message)}</p>
       </div>
     `;
   }
@@ -2901,10 +2850,12 @@ function testClaimBusterToggle() {
 // NEW: Function to force show expandable section for testing
 function forceShowExpandableSection() {
   console.log("🔧 FORCE SHOWING EXPANDABLE SECTION FOR TESTING");
-  const expandableSection = document.querySelector('.claimbuster-expandable');
-  
-  if (expandableSection) {
-    showClaimBusterExpandableSection();
+  const statsSection = document.getElementById('claimbuster-stats');
+  const detailedClaims = document.getElementById('detailed-claims');
+
+  if (statsSection || detailedClaims) {
+    if (statsSection) statsSection.style.display = 'block';
+    if (detailedClaims) detailedClaims.style.display = 'block';
     console.log("Expandable section forced visible");
   } else {
     console.log("No expandable section exists");
@@ -3041,7 +2992,7 @@ function createClaimBusterMiniWindow(claimbusterResult) {
       const claimPriority = getClaimBusterPriority(claim.score);
       return `
         <div style="margin: 8px 0; padding: 8px; background: ${claimPriority.bgColor}; border-radius: 4px;">
-          <div style="font-size: 13px; line-height: 1.3; margin-bottom: 4px;">${claim.sentence.substring(0, 80)}${claim.sentence.length > 80 ? '...' : ''}</div>
+          <div style="font-size: 13px; line-height: 1.3; margin-bottom: 4px;">${escapeHtml(claim.sentence.substring(0, 80))}${claim.sentence.length > 80 ? '...' : ''}</div>
           <div style="font-size: 11px; color: ${claimPriority.color}; font-weight: 600;">${claimPriority.level}</div>
         </div>
       `;
@@ -3052,7 +3003,7 @@ function createClaimBusterMiniWindow(claimbusterResult) {
       const claimPriority = getClaimBusterPriority(result.score);
       return `
         <div style="margin: 8px 0; padding: 8px; background: ${claimPriority.bgColor}; border-radius: 4px;">
-          <div style="font-size: 13px; line-height: 1.3; margin-bottom: 4px;">${result.sentence.substring(0, 80)}${result.sentence.length > 80 ? '...' : ''}</div>
+          <div style="font-size: 13px; line-height: 1.3; margin-bottom: 4px;">${escapeHtml(result.sentence.substring(0, 80))}${result.sentence.length > 80 ? '...' : ''}</div>
           <div style="font-size: 11px; color: ${claimPriority.color}; font-weight: 600;">${claimPriority.level}</div>
         </div>
       `;
@@ -3114,61 +3065,20 @@ function showClaimBusterMiniWindow() {
     return;
   }
   
-  console.log("Showing ClaimBuster mini window with AGGRESSIVE STYLING");
-  
-  // AGGRESSIVE styling to make sure it's visible
   claimBusterMiniWindow.style.position = 'fixed';
-  claimBusterMiniWindow.style.top = '100px';  // Changed from bottom to top
+  claimBusterMiniWindow.style.top = '100px';
   claimBusterMiniWindow.style.right = '100px';
-  claimBusterMiniWindow.style.zIndex = '999999999'; // Even higher z-index
+  claimBusterMiniWindow.style.zIndex = '2147483647';
   claimBusterMiniWindow.style.display = 'block';
-  claimBusterMiniWindow.style.opacity = '1'; // Start with full opacity
+  claimBusterMiniWindow.style.opacity = '1';
   claimBusterMiniWindow.style.width = '300px';
   claimBusterMiniWindow.style.height = 'auto';
   claimBusterMiniWindow.style.minHeight = '100px';
-  
-  // Add VERY visible styling for debugging
-  claimBusterMiniWindow.style.border = '5px solid red';
-  claimBusterMiniWindow.style.backgroundColor = 'yellow';
-  claimBusterMiniWindow.style.color = 'black';
-  claimBusterMiniWindow.style.padding = '20px';
-  claimBusterMiniWindow.style.fontSize = '16px';
-  claimBusterMiniWindow.style.fontWeight = 'bold';
-  
-  // Add a test message
-  if (!claimBusterMiniWindow.querySelector('.test-message')) {
-    const testDiv = document.createElement('div');
-    testDiv.className = 'test-message';
-    testDiv.innerHTML = '🎯 ClaimBuster Mini Window - VISIBLE TEST';
-    testDiv.style.cssText = 'background: red; color: white; padding: 10px; margin: 10px 0; border: 2px solid black;';
-    claimBusterMiniWindow.insertBefore(testDiv, claimBusterMiniWindow.firstChild);
-  }
-  
-  // Log final position for debugging
-  console.log("ClaimBuster mini window positioned and styled");
-  
-  setTimeout(() => {
-    if (claimBusterMiniWindow) {
-      const rect = claimBusterMiniWindow.getBoundingClientRect();
-      console.log("Mini window position and size:", {
-        top: rect.top,
-        left: rect.left,
-        right: rect.right,
-        bottom: rect.bottom,
-        width: rect.width,
-        height: rect.height,
-        visible: rect.width > 0 && rect.height > 0,
-        inViewport: rect.top >= 0 && rect.left >= 0 && rect.bottom <= window.innerHeight && rect.right <= window.innerWidth
-      });
-      
-      console.log("Window viewport size:", {
-        width: window.innerWidth,
-        height: window.innerHeight
-      });
-      
-      console.log("ClaimBuster mini window should be VERY visible now with yellow background and red border!");
-    }
-  }, 100);
+  claimBusterMiniWindow.style.background = '#ffffff';
+  claimBusterMiniWindow.style.border = '1px solid #dadce0';
+  claimBusterMiniWindow.style.borderRadius = '8px';
+  claimBusterMiniWindow.style.boxShadow = '0 4px 15px rgba(0,0,0,0.2)';
+  claimBusterMiniWindow.style.transition = 'opacity 0.2s ease';
 }
 
 // NEW: Function to hide ClaimBuster mini window
@@ -3217,7 +3127,7 @@ function displayResults(result) {
     contentDiv.innerHTML = `
       <div class="ai-verdict-banner misleading">
         <div class="ai-verdict-title">❌ Analysis Failed</div>
-        <div class="ai-verdict-summary">${result.error || 'Unable to analyze this article. Please try again.'}</div>
+        <div class="ai-verdict-summary">${escapeHtml(result.error || 'Unable to analyze this article. Please try again.')}</div>
       </div>
       <div class="ai-action-buttons">
         <button class="ai-btn ai-btn-primary" id="try-again-btn">Try Again</button>
@@ -3346,7 +3256,7 @@ function displayResults(result) {
           <div class="ai-confidence">${getConfidenceDisplay(confidence).text} Confidence</div>
         </div>
       </div>
-      <div class="ai-verdict-summary">${summary}</div>
+      <div class="ai-verdict-summary">${escapeHtml(summary)}</div>
     </div>
 
     <!-- Navigation Tabs (Updated for Multimedia Content) -->
@@ -3364,13 +3274,13 @@ function displayResults(result) {
       <div class="ai-tab-content active" id="tab-overview">
         <div class="ai-section">
           <h4>Quick Summary</h4>
-          <p>${analysis.quick_summary}</p>
+          <p>${escapeHtml(analysis.quick_summary || summary)}</p>
         </div>
         ${analysis.red_flags && Array.isArray(analysis.red_flags) && analysis.red_flags.length > 0 ? `
           <div class="ai-section ai-red-flags">
             <h4>🚨 Red Flags</h4>
             <ul>
-              ${analysis.red_flags.map(flag => `<li>${flag}</li>`).join('')}
+              ${analysis.red_flags.map(flag => `<li>${escapeHtml(flag)}</li>`).join('')}
             </ul>
           </div>
         ` : ''}
@@ -3385,7 +3295,7 @@ function displayResults(result) {
           </div>
         </div>
           <h4>💡 Recommendations</h4>
-          <p>${recommendations}</p>
+          <p>${escapeHtml(recommendations)}</p>
         </div>
       </div>
 
@@ -3395,21 +3305,21 @@ function displayResults(result) {
           <div class="ai-section">
             <h4>Bias Type</h4>
             <div class="ai-tags">
-              ${Array.isArray(analysis.bias_analysis.type_of_bias) ? 
-                analysis.bias_analysis.type_of_bias.map(bias => `<span class="ai-tag">${bias}</span>`).join('') : 
-                `<span class="ai-tag">${analysis.bias_analysis.type_of_bias || 'Not specified'}</span>`
+              ${Array.isArray(analysis.bias_analysis.type_of_bias) ?
+                analysis.bias_analysis.type_of_bias.map(bias => `<span class="ai-tag">${escapeHtml(bias)}</span>`).join('') :
+                `<span class="ai-tag">${escapeHtml(analysis.bias_analysis.type_of_bias || 'Not specified')}</span>`
               }
             </div>
           </div>
           <div class="ai-section">
             <h4>Bias Direction</h4>
-            <div class="ai-bias-direction">${analysis.bias_analysis.bias_direction || 'Not determined'}</div>
+            <div class="ai-bias-direction">${escapeHtml(analysis.bias_analysis.bias_direction || 'Not determined')}</div>
           </div>
           ${analysis.bias_analysis.manipulation_techniques && Array.isArray(analysis.bias_analysis.manipulation_techniques) && analysis.bias_analysis.manipulation_techniques.length > 0 ? `
             <div class="ai-section">
               <h4>Manipulation Techniques</h4>
               <ul>
-                ${analysis.bias_analysis.manipulation_techniques.map(tech => `<li>${tech}</li>`).join('')}
+                ${analysis.bias_analysis.manipulation_techniques.map(tech => `<li>${escapeHtml(tech)}</li>`).join('')}
               </ul>
             </div>
           ` : ''}
@@ -3417,7 +3327,7 @@ function displayResults(result) {
             <div class="ai-section">
               <h4>Dog-whistle Elements</h4>
               <div class="ai-tags">
-                ${analysis.bias_analysis.dog_whistle_elements.map(element => `<span class="ai-tag warning">${element}</span>`).join('')}
+                ${analysis.bias_analysis.dog_whistle_elements.map(element => `<span class="ai-tag warning">${escapeHtml(element)}</span>`).join('')}
               </div>
             </div>
           ` : ''}
@@ -3431,9 +3341,9 @@ function displayResults(result) {
         ${analysis.writing_style_assessment ? `
           <div class="ai-section">
             <h4>Writing Style</h4>
-            <p><strong>Tone:</strong> ${analysis.writing_style_assessment.tone || 'Not analyzed'}</p>
-            <p><strong>Target Audience:</strong> ${analysis.writing_style_assessment.target_audience || 'General'}</p>
-            <p><strong>Political Framing:</strong> ${analysis.writing_style_assessment.political_framing || 'Not detected'}</p>
+            <p><strong>Tone:</strong> ${escapeHtml(analysis.writing_style_assessment.tone || 'Not analyzed')}</p>
+            <p><strong>Target Audience:</strong> ${escapeHtml(analysis.writing_style_assessment.target_audience || 'General')}</p>
+            <p><strong>Political Framing:</strong> ${escapeHtml(analysis.writing_style_assessment.political_framing || 'Not detected')}</p>
           </div>
         ` : ''}
       </div>
@@ -3443,27 +3353,27 @@ function displayResults(result) {
         ${analysis.multimedia_analysis ? `
           <div class="ai-section">
             <h4>Content Type</h4>
-            <p><strong>Platform:</strong> ${analysis.multimedia_analysis.platform || 'Unknown'}</p>
-            <p><strong>Duration:</strong> ${analysis.multimedia_analysis.duration ? analysis.multimedia_analysis.duration + ' sec' : 'Not detected'}</p>
-            <p><strong>Language:</strong> ${analysis.multimedia_analysis.detected_language || 'Auto-detected'}</p>
+            <p><strong>Platform:</strong> ${escapeHtml(analysis.multimedia_analysis.platform || 'Unknown')}</p>
+            <p><strong>Duration:</strong> ${analysis.multimedia_analysis.duration ? escapeHtml(analysis.multimedia_analysis.duration) + ' sec' : 'Not detected'}</p>
+            <p><strong>Language:</strong> ${escapeHtml(analysis.multimedia_analysis.detected_language || 'Auto-detected')}</p>
           </div>
           <div class="ai-section">
             <h4>Audio Quality</h4>
-            <div class="ai-level-indicator ${(analysis.multimedia_analysis.audio_quality || 'MEDIUM').toLowerCase()}">
-              ${analysis.multimedia_analysis.audio_quality || 'MEDIUM'}
+            <div class="ai-level-indicator ${escapeHtml((analysis.multimedia_analysis.audio_quality || 'MEDIUM').toLowerCase())}">
+              ${escapeHtml(analysis.multimedia_analysis.audio_quality || 'MEDIUM')}
             </div>
           </div>
           ${analysis.multimedia_analysis.speech_patterns && Array.isArray(analysis.multimedia_analysis.speech_patterns) && analysis.multimedia_analysis.speech_patterns.length > 0 ? `
             <div class="ai-section">
               <h4>Speech Patterns</h4>
               <div class="ai-tags">
-                ${analysis.multimedia_analysis.speech_patterns.map(pattern => `<span class="ai-tag">${pattern}</span>`).join('')}
+                ${analysis.multimedia_analysis.speech_patterns.map(pattern => `<span class="ai-tag">${escapeHtml(pattern)}</span>`).join('')}
               </div>
             </div>
           ` : ''}
           <div class="ai-section">
             <h4>Content Analysis</h4>
-            <p>${analysis.multimedia_analysis.content_summary || 'Video content has been analyzed for factual accuracy and potential misinformation.'}</p>
+            <p>${escapeHtml(analysis.multimedia_analysis.content_summary || 'Video content has been analyzed for factual accuracy and potential misinformation.')}</p>
           </div>
         ` : `
           <div class="ai-section">
@@ -3490,16 +3400,16 @@ function displayResults(result) {
           <div class="ai-section">
             <h4>Full Transcript</h4>
             <div style="background: #f8f9fa; border-radius: 8px; padding: 15px; max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 14px; line-height: 1.6;">
-              ${analysis.transcript.segments && Array.isArray(analysis.transcript.segments) ? 
+              ${analysis.transcript.segments && Array.isArray(analysis.transcript.segments) ?
                 analysis.transcript.segments.map(segment => `
                   <div style="margin-bottom: 10px;">
-                    <span style="color: #666; font-size: 12px;">[${segment.start}s - ${segment.end}s]</span>
+                    <span style="color: #666; font-size: 12px;">[${escapeHtml(segment.start)}s - ${escapeHtml(segment.end)}s]</span>
                     <br>
-                    <span>${segment.text}</span>
+                    <span>${escapeHtml(segment.text)}</span>
                   </div>
-                `).join('') : 
-                analysis.transcript.text ? 
-                  `<div style="margin-bottom: 10px;">${analysis.transcript.text}</div>` : 
+                `).join('') :
+                analysis.transcript.text ?
+                  `<div style="margin-bottom: 10px;">${escapeHtml(analysis.transcript.text)}</div>` :
                   '<div style="color: #666;">No transcript segments available</div>'
               }
             </div>
@@ -3507,8 +3417,8 @@ function displayResults(result) {
           ${analysis.transcript.language_detected ? `
             <div class="ai-section">
               <h4>Language Detection</h4>
-              <p><strong>Detected:</strong> ${analysis.transcript.language_detected}</p>
-              <p><strong>Confidence:</strong> ${analysis.transcript.language_confidence || '95%'}</p>
+              <p><strong>Detected:</strong> ${escapeHtml(analysis.transcript.language_detected)}</p>
+              <p><strong>Confidence:</strong> ${escapeHtml(analysis.transcript.language_confidence || '95%')}</p>
             </div>
           ` : ''}
         ` : `
@@ -3542,17 +3452,17 @@ function displayResults(result) {
               <div class="ai-claim-card">
                 <div class="ai-claim-header">
                   <span class="ai-claim-verdict" style="background-color: ${severityColor}20; color: ${severityColor};">
-                    ${moment.severity || 'FLAGGED'}
+                    ${escapeHtml(moment.severity || 'FLAGGED')}
                   </span>
                   <span style="background: #f0f0f0; padding: 4px 8px; border-radius: 12px; font-size: 12px; color: #666;">
-                    ⏱️ ${moment.timestamp}
+                    ⏱️ ${escapeHtml(moment.timestamp)}
                   </span>
                 </div>
-                <div class="ai-claim-text">${moment.description || moment.text}</div>
-                <div class="ai-claim-explanation">${moment.reason || moment.explanation}</div>
+                <div class="ai-claim-text">${escapeHtml(moment.description || moment.text)}</div>
+                <div class="ai-claim-explanation">${escapeHtml(moment.reason || moment.explanation)}</div>
                 ${moment.suggested_verification ? `
                   <div class="ai-claim-context">
-                    <strong>Verification Suggestion:</strong> ${moment.suggested_verification}
+                    <strong>Verification Suggestion:</strong> ${escapeHtml(moment.suggested_verification)}
                   </div>
                 ` : ''}
               </div>
@@ -3774,6 +3684,7 @@ async function performAnalysis(forceAnalysis = false) {
       if (!contentData || !contentData.success) {
         console.log("Video content extraction failed:", contentData?.error);
         if (analysisTimeout) clearTimeout(analysisTimeout);
+        clearInterval(progressInterval);
         handleAnalysisError(`Video analysis failed: ${contentData?.error || 'Unknown error'}`);
         return null;
       }
@@ -3793,6 +3704,7 @@ async function performAnalysis(forceAnalysis = false) {
       if (!contentData.headline && contentData.article.length < 100) {
         console.log("Insufficient content found");
         if (analysisTimeout) clearTimeout(analysisTimeout);
+        clearInterval(progressInterval);
         handleAnalysisError('Could not find enough article content to analyze.');
         return null;
       }
@@ -3807,6 +3719,7 @@ async function performAnalysis(forceAnalysis = false) {
     if (currentArticleHash === articleHash && !forceAnalysis && latestResults) {
       console.log("Same article hash detected, using existing results");
       clearTimeout(analysisTimeout);
+      clearInterval(progressInterval);
       isAnalyzing = false;
       updateIndicatorWithResult(latestResults);
       return latestResults;
@@ -3856,10 +3769,13 @@ async function performAnalysis(forceAnalysis = false) {
         contentDataType: contentData ? (contentData.audio ? 'video' : 'text') : 'unknown'
       });
       
-      // Set up a one-time listener for the response
+      // Set up a one-time listener that settles this analysis promise.
+      // The global onMessage listener (registered at script load, so it runs
+      // first) already validates the result, caches it, updates the indicator
+      // and renders the panel - doing it again here would render twice.
       const responseHandler = (message, sender, sendResponse) => {
         console.log("Response handler received message:", message.type);
-        
+
         if (message.type === 'FACTCHECK_RESULT' && message.result.hash === articleHash) {
           console.log("Matching response received for hash:", articleHash);
           responseReceived = true;
@@ -3867,22 +3783,8 @@ async function performAnalysis(forceAnalysis = false) {
           if (analysisTimeout) clearTimeout(analysisTimeout);
           clearInterval(progressInterval);
           clearTimeout(responseTimeout);
-          
-          latestResults = message.result;
+
           hasAnalyzedCurrentPage = true;
-          updateIndicatorWithResult(message.result);
-          
-          // Set last analyzed URL to prevent unnecessary resets
-          if (message.result.success) {
-            lastAnalyzedUrl = currentPageUrl;
-            setCachedResult(articleHash, message.result);
-          }
-          
-          // Display results if panel is open
-          if (resultsPanel && resultsPanel.style.display === 'block') {
-            displayResults(message.result);
-          }
-          
           resolve(message.result);
         }
       };
@@ -3905,26 +3807,27 @@ async function performAnalysis(forceAnalysis = false) {
       try {
         console.log("Attempting to send message to background script...");
         
+        // Helper: abort this analysis attempt cleanly (timers, listener, promise)
+        const failAnalysis = (userMessage, error) => {
+          if (analysisTimeout) clearTimeout(analysisTimeout);
+          clearInterval(progressInterval);
+          clearTimeout(responseTimeout);
+          chrome.runtime.onMessage.removeListener(responseHandler);
+          handleAnalysisError(userMessage);
+          reject(error instanceof Error ? error : new Error(userMessage));
+        };
+
         // Prepare data based on content type
         let messageData;
         if (contentData.audio && isVideoPlatform()) {
-          // Video content - check if audio extraction was successful
-          if (!contentData.audio) {
-            console.error("No audio data available for transcription");
-            console.error("Full contentData:", contentData);
-            if (analysisTimeout) clearTimeout(analysisTimeout);
-            handleAnalysisError('Audio extraction failed. Please try refreshing the page and ensure the video has audio.');
-            return null;
-          }
-          
           // Video content - send with audio blob
           if (resultsPanel && resultsPanel.style.display === 'block') {
             showLoadingState('Preparing audio for transcription...');
           }
-          
+
           // ENHANCED: Prepare audio with validation and optional WAV conversion
           console.log("Audio blob before preparation:", contentData.audio.size, "bytes, type:", contentData.audio.type);
-          
+
           let preparedAudio;
           try {
             // Try with original format first
@@ -3932,56 +3835,54 @@ async function performAnalysis(forceAnalysis = false) {
             console.log("Audio preparation successful:", preparedAudio.size, "bytes");
           } catch (error) {
             console.warn("Initial audio preparation failed, trying WAV conversion:", error.message);
-            
+
             // If original format fails, try WAV conversion
             try {
               preparedAudio = await prepareAudioForWhisper(contentData.audio, true);
               console.log("WAV conversion successful:", preparedAudio.size, "bytes");
             } catch (wavError) {
               console.error("Both audio preparation methods failed:", wavError.message);
-              if (analysisTimeout) clearTimeout(analysisTimeout);
-              handleAnalysisError(`Audio preparation failed: ${wavError.message}`);
-              return null;
+              failAnalysis(`Audio preparation failed: ${wavError.message}`, wavError);
+              return;
             }
           }
-          
-          // FIXED: Convert audio blob to Array for Chrome message passing
-          let audioArray;
+
+          // Encode the audio blob as base64 for Chrome message passing.
+          // Blobs/ArrayBuffers don't survive sendMessage serialization; base64
+          // adds only ~33% overhead vs ~300% for a plain number array.
+          let audioBase64;
           try {
-            const audioArrayBuffer = await preparedAudio.audioBlob.arrayBuffer();
-            
+            audioBase64 = await new Promise((resolveRead, rejectRead) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolveRead(reader.result.split(',')[1]);
+              reader.onerror = () => rejectRead(reader.error || new Error('FileReader failed'));
+              reader.readAsDataURL(preparedAudio.audioBlob);
+            });
+
             console.log("🔧 CONTENT SCRIPT AUDIO DEBUG:");
             console.log("Original audio blob size:", contentData.audio.size, "bytes");
             console.log("Prepared audio blob size:", preparedAudio.audioBlob.size, "bytes");
-            console.log("ArrayBuffer size:", audioArrayBuffer.byteLength, "bytes");
+            console.log("Base64 payload length:", audioBase64.length, "chars");
             console.log("Audio MIME type:", preparedAudio.audioBlob.type);
             console.log("Was converted to WAV:", preparedAudio.converted);
-            
-            // CRITICAL FIX: Convert ArrayBuffer to regular Array for message passing
-            // ArrayBuffers don't serialize properly through Chrome's message system
-            audioArray = Array.from(new Uint8Array(audioArrayBuffer));
-            console.log("✅ Converted to Array:", audioArray.length, "bytes");
-            
-            // Validate array before sending
-            if (audioArray.length < 2048) {
-              throw new Error(`Audio array too small: ${audioArray.length} bytes`);
+
+            // Validate payload before sending (base64 is ~4/3 of the byte size)
+            if (audioBase64.length * 0.75 < 2048) {
+              throw new Error(`Audio payload too small: ~${Math.round(audioBase64.length * 0.75)} bytes`);
             }
-            
-            console.log("✅ Audio array ready for Chrome message transfer");
-            
+
           } catch (error) {
             console.error("Failed to prepare audio for transfer:", error);
-            if (analysisTimeout) clearTimeout(analysisTimeout);
-            handleAnalysisError(`Failed to prepare audio: ${error.message}`);
-            return null;
+            failAnalysis(`Failed to prepare audio: ${error.message}`, error);
+            return;
           }
-          
+
           messageData = {
             type: 'VIDEO_CONTENT',
             data: {
               platform: detectVideoPlatform(),
               metadata: contentData.metadata,
-              audioData: audioArray,  // ← Send as Array, not ArrayBuffer!
+              audioData: audioBase64,  // base64 string - decoded in background.js
               audioType: preparedAudio.audioBlob.type,
               duration: contentData.duration,
               format: preparedAudio.audioBlob.type,
@@ -4003,8 +3904,7 @@ async function performAnalysis(forceAnalysis = false) {
         console.log("📤 SENDING MESSAGE TO BACKGROUND:");
         console.log("Message type:", messageData.type);
         if (messageData.type === 'VIDEO_CONTENT') {
-          console.log("Audio data size being sent:", messageData.data.audioData.length, "bytes (as Array)");
-          console.log("Audio data type:", Array.isArray(messageData.data.audioData) ? 'Array' : typeof messageData.data.audioData);
+          console.log("Audio payload being sent:", messageData.data.audioData.length, "base64 chars");
           console.log("Audio type being sent:", messageData.data.audioType);
           console.log("Platform:", messageData.data.platform);
           console.log("Duration:", messageData.data.duration);
@@ -4183,75 +4083,6 @@ function getConfidenceDisplay(confidence) {
   return { text: 'MEDIUM', class: 'medium' };
 }
 
-// Enhanced display function specifically for video analysis results
-function displayVideoAnalysis(analysis) {
-  console.log('📊 displayVideoAnalysis called with:', {
-    hasAnalysis: !!analysis,
-    verdict: analysis?.overall_verdict,
-    hasTranscript: !!analysis?.transcript,
-    transcriptSegments: analysis?.transcript?.segments?.length || 0
-  });
-  
-  try {
-    if (!analysis) {
-      console.error('No analysis provided to displayVideoAnalysis');
-      return;
-    }
-    
-    // Create a result object that matches what displayResults expects
-    const videoResult = {
-      success: true,
-      type: 'video',
-      analysis: analysis
-    };
-    
-    // Use the existing displayResults function
-    displayResults(videoResult);
-    
-    console.log('✅ Video analysis UI updated successfully');
-  } catch (error) {
-    console.error('❌ Error in displayVideoAnalysis:', error);
-    throw error; // Re-throw to be caught by message handler
-  }
-}
-
-// Helper function to force UI update and clear loading states
-function clearLoadingAndShowResults(analysis) {
-  console.log('🔄 Forcing UI update with analysis:', !!analysis);
-  
-  // Remove ALL loading indicators
-  document.querySelectorAll('.ai-loading-state, .ai-loading, [class*="loading"]').forEach(el => {
-    console.log('Removing loading element:', el.className);
-    el.remove();
-  });
-  
-  // Hide any "preparing" messages
-  const preparingElements = document.querySelectorAll('*');
-  preparingElements.forEach(el => {
-    if (el.textContent && el.textContent.includes('Preparing audio for transcription')) {
-      console.log('Found preparing text, hiding parent');
-      el.style.display = 'none';
-    }
-    if (el.textContent && el.textContent.includes('Still processing')) {
-      console.log('Found processing text, hiding');
-      el.style.display = 'none';
-    }
-  });
-  
-  // Make sure results container exists
-  let resultsContainer = document.querySelector('.ai-results-container');
-  if (!resultsContainer) {
-    resultsContainer = document.querySelector('.ai-fact-checker-widget .ai-content');
-  }
-  
-  if (resultsContainer && analysis) {
-    console.log('📊 Force displaying video analysis');
-    displayVideoAnalysis(analysis);
-  } else {
-    console.error('No results container found or no analysis provided!');
-  }
-}
-
 // Enhanced message handler with better result validation
 chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   console.log("Content script received message:", message.type, message);
@@ -4370,34 +4201,18 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
       // Update indicator
       updateIndicatorWithResult(message.result);
       
-      // Clear any loading states first
+      // Clear any loading states first - only inside OUR panel, never on the
+      // host page (news sites have their own elements with "loading" classes)
       console.log('🔄 Clearing loading states...');
-      const loadingElements = document.querySelectorAll('.ai-loading-state, .ai-loading, [class*="loading"]');
-      loadingElements.forEach(el => {
-        console.log('Removing loading element:', el.className);
-        el.remove();
-      });
-      
-      // Hide any "preparing" messages
-      document.querySelectorAll('*').forEach(el => {
-        if (el.textContent && el.textContent.includes('Preparing audio for transcription')) {
-          console.log('Found preparing text, hiding');
-          el.style.display = 'none';
-        }
-      });
-      
-      // Display results if panel is open
+      if (resultsPanel) {
+        resultsPanel.querySelectorAll('.ai-loading-state, .ai-loading').forEach(el => el.remove());
+      }
+
+      // Display results if panel is open. displayResults handles both article
+      // and video results (and keeps result.claimbuster for the toggle).
       if (resultsPanel && resultsPanel.style.display === 'block') {
         console.log('📊 Panel is open, displaying results');
-        
-        // For video content, use displayVideoAnalysis
-        if (message.result.type === 'video' || message.result.platform || message.result.analysis?.transcript) {
-          console.log('🎬 Displaying video analysis');
-          displayVideoAnalysis(message.result.analysis);
-        } else {
-          console.log('📄 Displaying text analysis');
-          displayResults(message.result);
-        }
+        displayResults(message.result);
       } else {
         console.log('📋 Panel not open, storing results for later');
       }
@@ -4409,7 +4224,7 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
       if (resultsPanel && resultsPanel.style.display === 'block' && isAnalyzing) {
         showLoadingState(message.message || 'Analyzing...');
         
-        // Update with quick summary if available
+        // Update with quick summary if available (showLoadingState escapes it)
         if (message.quickSummary) {
           showLoadingState(`Quick assessment: ${message.quickSummary}`);
         }
@@ -4495,17 +4310,10 @@ function resetPageState() {
   // Reset ClaimBuster state
   claimBusterToggleState = false;
   hideClaimBusterMiniWindow();
-  
-  // Clear cache for previous article
-  if (currentArticleHash && isExtensionContextValid()) {
-    try {
-      chrome.storage.local.remove([`analysis_${currentArticleHash}`]);
-      console.log('Cache cleared on navigation');
-    } catch (e) {
-      // Ignore errors during cleanup
-    }
-  }
-  
+
+  // NOTE: the cached analysis is intentionally kept - it expires after 7 days
+  // and cleanOldCache() caps storage at 100 entries. Deleting it here made
+  // the cache useless for revisited articles.
   currentArticleHash = null;
   
   // Reset indicator if it exists
@@ -4631,8 +4439,14 @@ const originalReplaceState = history.replaceState;
 
 history.pushState = function() {
   originalPushState.apply(history, arguments);
-  // Only reset if it's a completely different article
-  if (window.location.pathname !== currentPageUrl.split('?')[0].split('#')[0]) {
+  // Only reset if it's a completely different article (compare pathnames)
+  let previousPath = null;
+  try {
+    previousPath = new URL(currentPageUrl).pathname;
+  } catch (e) {
+    // currentPageUrl not parseable - treat as changed
+  }
+  if (window.location.pathname !== previousPath) {
     resetPageState();
   }
 };
@@ -4885,8 +4699,8 @@ function generateDetailedClaimsUserFriendly(claims) {
     const score = claim.score || claim.checkworthiness || 0;
     const text = claim.sentence || claim.text || claim.claim || 'No text available';
     
-    // Clean up the text (remove extra whitespace, line breaks)
-    const cleanText = text.replace(/\s+/g, ' ').trim();
+    // Clean up the text (remove extra whitespace, line breaks) and escape it for innerHTML
+    const cleanText = escapeHtml(text.replace(/\s+/g, ' ').trim());
     
     // Determine priority based on score
     let priority, priorityColor, priorityBg, priorityText, priorityIcon;
@@ -5247,7 +5061,7 @@ async function testYouTubeVideoCapture() {
     
     // Test audio extraction
     console.log("Starting audio extraction test...");
-    const result = await extractVideoAudio(platform);
+    const result = await extractAudioFromVideo(platform);
     
     if (result.success) {
       console.log(`✅ Audio extraction successful: ${result.audioBlob.size} bytes`);
@@ -5744,20 +5558,21 @@ function showProcessingMessage(chunksRecorded, wasInterrupted) {
 // Test function for chunked recording
 async function testChunkedRecording() {
   console.log("=== CHUNKED RECORDING TEST ===");
-  
-  const video = findVideoElement(detectPlatform());
+
+  const platform = detectVideoPlatform();
+  const video = findVideoElement(platform);
   if (!video) {
     console.error('No video found for testing');
     return;
   }
-  
+
   console.log('Testing chunked recording on:', {
     duration: video.duration,
-    platform: detectPlatform()
+    platform: platform
   });
-  
+
   try {
-    const result = await extractNewsVideoContentWithChunks(video, detectPlatform());
+    const result = await extractNewsVideoContentWithChunks(video, platform);
     console.log('Chunked recording result:', result);
   } catch (error) {
     console.error('Chunked recording test failed:', error);

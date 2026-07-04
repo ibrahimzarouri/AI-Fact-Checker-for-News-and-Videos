@@ -1,8 +1,8 @@
-# AI Fact Checker Extension - Complete Developer Documentation
+# AI Fact Checker for News & Videos - Complete Developer Documentation
 
 **Author & Developer:** Ibrahim Zarouri  
 **Contact:** ibrahimzarouri@hotmail.com, ibrahim.zarouri@studmail.w-hs.de  
-**GitHub:** https://github.com/ebooooooooo  
+**GitHub:** https://github.com/ibrahimzarouri  
 **Version:** 1.0  
 **Last Updated:** 14.07.2025
 

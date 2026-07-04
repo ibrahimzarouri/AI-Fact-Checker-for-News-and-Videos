@@ -3,26 +3,9 @@ importScripts('config.js');
 
 console.log("AI Fact Checker Extension: Background script loaded");
 
-// Set up periodic alarm to keep service worker active
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create('refresh', { periodInMinutes: 0.1 }); // Every 6 seconds
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create('refresh', { periodInMinutes: 0.1 });
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'refresh') {
-    // Do something to keep the service worker active
-    handleKeepAlive();
-  }
-});
-
-async function handleKeepAlive() {
-  // Query active tabs or perform other tasks
-  const tabs = await chrome.tabs.query({ active: true });
-}
+// NOTE: no keep-alive hack needed. Chrome keeps MV3 service workers alive
+// while messages are being handled and fetch() calls are in flight, and
+// chrome.alarms cannot fire more often than every 30 seconds anyway.
 
 // Configuration - embedded directly to avoid import issues
 const CONFIG = {
@@ -91,29 +74,16 @@ async function analyzeWithClaimBuster(articleContent) {
     
     console.log('Starting ClaimBuster analysis with quality filtering...');
     
-    // Split text into sentences for ClaimBuster analysis
+    // Split text into sentences, then prioritize the ones most likely to
+    // contain checkable claims (capped to keep API usage reasonable)
     const sentences = splitTextIntoSentences(fullText);
-    
-    // IMPROVED: Smart sentence selection based on article length
-    let sentencesToAnalyze;
-    if (sentences.length <= 10) {
-      // Short articles: analyze all sentences
-      sentencesToAnalyze = sentences;
-      console.log(`Short article: analyzing all ${sentences.length} sentences`);
-    } else if (sentences.length <= 20) {
-      // Medium articles: analyze first 15 sentences
-      sentencesToAnalyze = sentences.slice(0, 15);
-      console.log(`Medium article: analyzing first 15 of ${sentences.length} sentences`);
-    } else {
-      // Long articles: analyze first 25 sentences
-      sentencesToAnalyze = sentences.slice(0, 25);
-      console.log(`Long article: analyzing first 25 of ${sentences.length} sentences`);
-    }
-    
+    const sentencesToAnalyze = selectClaimRelevantSentences(sentences, 15);
+
     console.log(`Total sentences found: ${sentences.length}, analyzing: ${sentencesToAnalyze.length}`);
-    
-    // Analyze sentences with ClaimBuster API
-    const sentencePromises = sentencesToAnalyze.map(async (sentence, index) => {
+
+    // Analyze sentences with the ClaimBuster API in small batches instead of
+    // firing every request at once (kinder to their rate limits)
+    const analyzeSentence = async (sentence, index) => {
       try {
         const response = await fetch(CONFIG.CLAIMBUSTER_API_URL, {
           method: 'POST',
@@ -141,12 +111,21 @@ async function analyzeWithClaimBuster(articleContent) {
         console.warn(`Error analyzing sentence ${index}:`, error);
         return null;
       }
-    });
+    };
 
-    const results = await Promise.allSettled(sentencePromises);
-    const validResults = results
-      .filter(r => r.status === 'fulfilled' && r.value !== null)
-      .map(r => r.value);
+    const validResults = [];
+    const BATCH_SIZE = 5;
+    for (let start = 0; start < sentencesToAnalyze.length; start += BATCH_SIZE) {
+      const batch = sentencesToAnalyze.slice(start, start + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map((sentence, offset) => analyzeSentence(sentence, start + offset))
+      );
+      batchResults.forEach(r => {
+        if (r.status === 'fulfilled' && r.value !== null) {
+          validResults.push(r.value);
+        }
+      });
+    }
 
     console.log(`ClaimBuster analysis completed: ${validResults.length} sentences analyzed`);
 
@@ -169,85 +148,76 @@ async function analyzeWithClaimBuster(articleContent) {
 }
 
 
-// ADD THIS: Helper function to split text into sentences
+// Split text into sentences and filter out boilerplate/navigation fragments.
+// NOTE: this used to be defined twice with conflicting behavior - the merged
+// version below keeps the boilerplate filters; claim-relevance selection
+// lives in selectClaimRelevantSentences().
 function splitTextIntoSentences(text) {
-  console.log('=== SENTENCE SPLITTING DEBUG ===');
-  console.log('Input text length:', text.length);
-  console.log('Input text preview:', text.substring(0, 200) + '...');
-  
-  // FIXED: Better sentence splitting regex that handles multiple scenarios
+  console.log('Sentence splitting input length:', text.length);
+
   const sentences = text
     // Split on sentence endings followed by whitespace or line breaks
     .split(/[.!?]+\s*\n*\s*/)
-    // Clean up each sentence
     .map(sentence => sentence.trim())
-    // Remove empty sentences
-    .filter(sentence => sentence.length > 0)
-    // Filter out very short fragments (less than 20 chars)
+    // Minimum length - drops empty strings and tiny fragments
     .filter(sentence => sentence.length > 20)
     // Remove any sentences that are just numbers or dates
     .filter(sentence => !/^\d+[\d\s\-\/\.:]*$/.test(sentence))
-    // Remove navigation/UI elements that might have been captured
+    // Remove navigation/UI boilerplate
     .filter(sentence => {
       const lower = sentence.toLowerCase();
-      return !lower.match(/^(teilen|drucken|weiter|zurück|mehr|weniger|klicken|hier|link)$/) &&
-             !lower.includes('cookie') &&
-             !lower.includes('datenschutz') &&
-             !lower.includes('impressum');
-    });
-  
-  console.log('=== SPLIT SENTENCES DEBUG ===');
-  console.log('Number of sentences after splitting:', sentences.length);
-  sentences.forEach((sentence, i) => {
-    console.log(`Sentence ${i} (${sentence.length} chars):`, sentence.substring(0, 100) + (sentence.length > 100 ? '...' : ''));
-  });
-  console.log('================================');
-  
-  // For longer articles, focus on significant sentences
-  if (sentences.length > 20) {
-    console.log('Article has many sentences, filtering for claim-relevant ones...');
-    
-    // Filter for sentences likely to contain claims (basic heuristics)
-    const filteredSentences = sentences.filter(sentence => {
-      const lower = sentence.toLowerCase();
-      
-      // Keywords that often appear in claims
-      const claimKeywords = [
-        // English keywords
-        'according to', 'claim', 'said', 'states', 'reports', 'announced', 
-        'revealed', 'confirmed', 'stated', 'suggests', 'indicates', 'shows',
-        'proves', 'demonstrates', 'million', 'billion', 'percent', '%', 
-        'research', 'study', 'survey', 'poll', 'increase', 'decrease',
-        // German keywords
-        'laut', 'gemäß', 'nach', 'zufolge', 'behauptet', 'sagte', 'erklärt',
-        'berichtet', 'verkündet', 'enthüllt', 'bestätigt', 'gibt an', 'deutet an',
-        'zeigt', 'beweist', 'belegt', 'millionen', 'milliarden', 'prozent',
-        'studie', 'umfrage', 'erhöhung', 'senkung', 'anstieg', 'rückgang',
-        'polizei', 'behörden', 'experten', 'wissenschaftler', 'forscher'
+      const navigationKeywords = [
+        'cookie', 'datenschutz', 'impressum', 'zur startseite', 'zum artikel',
+        'weiterlesen', 'mehr dazu', 'newsletter', 'anzeige', 'werbung',
+        'sponsored', 'partnerinhalt', 'breaking news'
       ];
-      
-      // Check if sentence contains any claim keywords or important patterns
-      const hasClaimKeywords = claimKeywords.some(keyword => lower.includes(keyword));
-      const hasNumbers = /\d+%|\d+\s+percent|\d+\s+prozent|\d+\s+million|\d+\s+billion|\d+\s+millionen|\d+\s+milliarden|\d+\s+meter|\d+\s+jahre|\d+\s+euro/.test(sentence);
-      const hasQuotes = sentence.includes('"') || sentence.includes('„') || sentence.includes('"');
-      
-      return hasClaimKeywords || hasNumbers || hasQuotes;
+      return !lower.match(/^(teilen|drucken|weiter|zurück|mehr|weniger|klicken|hier|link)$/) &&
+             !sentence.match(/\+\+\+.*\+\+\+/) &&
+             !navigationKeywords.some(keyword => lower.includes(keyword));
     });
-    
-    console.log('Filtered to', filteredSentences.length, 'claim-relevant sentences');
-    
-    // If filtering removed too many sentences, fall back to first 10 sentences
-    if (filteredSentences.length < 3) {
-      console.log('Too few sentences after filtering, using first 10 sentences instead');
-      return sentences.slice(0, 10);
-    }
-    
-    return filteredSentences.slice(0, 10); // Limit to 10 even after filtering
+
+  console.log(`Sentence splitting result: ${sentences.length} valid sentences`);
+  return sentences;
+}
+
+// Pick the sentences most likely to contain checkable claims, capped at
+// maxSentences to keep ClaimBuster API usage reasonable
+function selectClaimRelevantSentences(sentences, maxSentences = 15) {
+  if (sentences.length <= maxSentences) {
+    return sentences;
   }
-  
-  // For shorter articles, return all valid sentences (but limit to 10)
-  console.log('Short article, returning all', Math.min(sentences.length, 10), 'sentences');
-  return sentences.slice(0, 10);
+
+  // Keywords that often appear in claims
+  const claimKeywords = [
+    // English keywords
+    'according to', 'claim', 'said', 'states', 'reports', 'announced',
+    'revealed', 'confirmed', 'stated', 'suggests', 'indicates', 'shows',
+    'proves', 'demonstrates', 'million', 'billion', 'percent', '%',
+    'research', 'study', 'survey', 'poll', 'increase', 'decrease',
+    // German keywords
+    'laut', 'gemäß', 'zufolge', 'behauptet', 'sagte', 'erklärt',
+    'berichtet', 'verkündet', 'enthüllt', 'bestätigt', 'gibt an', 'deutet an',
+    'zeigt', 'beweist', 'belegt', 'millionen', 'milliarden', 'prozent',
+    'studie', 'umfrage', 'erhöhung', 'senkung', 'anstieg', 'rückgang',
+    'polizei', 'behörden', 'experten', 'wissenschaftler', 'forscher'
+  ];
+
+  const claimRelevant = sentences.filter(sentence => {
+    const lower = sentence.toLowerCase();
+    const hasClaimKeywords = claimKeywords.some(keyword => lower.includes(keyword));
+    const hasNumbers = /\d+%|\d+\s+percent|\d+\s+prozent|\d+\s+million|\d+\s+billion|\d+\s+millionen|\d+\s+milliarden|\d+\s+meter|\d+\s+jahre|\d+\s+euro/.test(sentence);
+    const hasQuotes = sentence.includes('"') || sentence.includes('„') || sentence.includes('“');
+    return hasClaimKeywords || hasNumbers || hasQuotes;
+  });
+
+  // If filtering removed too much, fall back to the first sentences
+  if (claimRelevant.length < 3) {
+    console.log(`Few claim-relevant sentences found, using first ${maxSentences} sentences`);
+    return sentences.slice(0, maxSentences);
+  }
+
+  console.log(`Selected ${Math.min(claimRelevant.length, maxSentences)} claim-relevant sentences of ${sentences.length}`);
+  return claimRelevant.slice(0, maxSentences);
 }
 
 // ALSO ADD THIS: Debug function to check if a sentence exists in the original article
@@ -348,42 +318,6 @@ function processClaimBusterResults(results, totalSentencesInArticle) {
   return result;
 }
 
-// OPTIONAL: Enhanced sentence splitting with better quality detection
-function splitTextIntoSentences(text) {
-  console.log('=== ENHANCED SENTENCE SPLITTING ===');
-  console.log('Input text length:', text.length);
-  
-  // Enhanced sentence splitting regex
-  const sentences = text
-    .split(/[.!?]+\s*\n*\s*/)
-    .map(sentence => sentence.trim())
-    .filter(sentence => sentence.length > 0)
-    .filter(sentence => sentence.length > 20) // Minimum length
-    .filter(sentence => !/^\d+[\d\s\-\/\.:]*$/.test(sentence)) // No date/number only
-    .filter(sentence => {
-      const lower = sentence.toLowerCase();
-      return !lower.match(/^(teilen|drucken|weiter|zurück|mehr|weniger|klicken|hier|link|cookie|datenschutz|impressum)$/) &&
-             !lower.includes('RACHE DER MULLAHS') &&
-             !lower.includes('IRAN-DROHNEN') &&
-             !sentence.match(/\+\+\+.*\+\+\+/) &&
-             !lower.includes('breaking news');
-    })
-    .filter(sentence => {
-      // ENHANCED: Filter out navigation and UI elements more aggressively
-      const navigationKeywords = [
-        'zur startseite', 'zum artikel', 'weiterlesen', 'mehr dazu',
-        'newsletter', 'anzeige', 'werbung', 'sponsored', 'partnerinhalt'
-      ];
-      const lower = sentence.toLowerCase();
-      return !navigationKeywords.some(keyword => lower.includes(keyword));
-    });
-  
-  console.log(`Sentence splitting result: ${sentences.length} valid sentences`);
-  console.log('Sample sentences:', sentences.slice(0, 3).map(s => s.substring(0, 50) + '...'));
-  console.log('====================================');
-  
-  return sentences;
-}
 
 /* =================================================================
                     WHISPER API INTEGRATION
@@ -460,7 +394,7 @@ async function transcribeAudioWithWhisper(audioBlob, metadata = {}) {
     formData.append('file', audioFile);
     formData.append('model', 'whisper-1');
     formData.append('response_format', 'verbose_json'); // Get timestamps and segments
-    formData.append('timestamp_granularities', 'segment'); // Explicitly request segments
+    formData.append('timestamp_granularities[]', 'segment'); // Explicitly request segments
     
     // Add language parameter only if specified (omitting it enables auto-detection)
     if (metadata.language) {
@@ -504,24 +438,6 @@ async function transcribeAudioWithWhisper(audioBlob, metadata = {}) {
         filename: filename,
         extension: extension
       });
-      
-      // Check for invalid file format errors
-      if (errorText.includes('Invalid file format') || 
-          errorText.includes('unsupported format') ||
-          errorText.includes('could not decode') ||
-          response.status === 400) {
-        console.log('🔄 Whisper rejected file format, requesting WAV conversion...');
-        
-        // Signal that WAV conversion is needed
-        const conversionError = new Error('NEEDS_WAV_CONVERSION');
-        conversionError.originalError = errorText;
-        conversionError.audioDetails = {
-          size: audioBlob.size,
-          type: audioBlob.type,
-          filename: filename
-        };
-        throw conversionError;
-      }
       
       throw new Error(`Whisper API error: ${response.status} ${response.statusText} - ${errorText}`);
     }
@@ -595,113 +511,6 @@ function calculateTranscriptionConfidence(transcriptionData) {
   return 75; // Default reasonable confidence
 }
 
-// WAV conversion in service worker
-async function convertToWavInServiceWorker(audioBlob) {
-  console.log('🔄 Starting WAV conversion in service worker...');
-  
-  try {
-    // Method 1: Try to use Web Audio API in service worker (limited support)
-    if (typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined') {
-      console.log('Attempting Web Audio API conversion...');
-      return await convertBlobToWavUsingWebAudio(audioBlob);
-    }
-    
-    // Method 2: Send conversion request to content script
-    console.log('Service worker lacks Web Audio API, requesting content script conversion...');
-    return await requestWavConversionFromContentScript(audioBlob);
-    
-  } catch (error) {
-    console.error('All WAV conversion methods failed:', error);
-    return null;
-  }
-}
-
-// Convert audio blob to WAV using Web Audio API (if available in service worker)
-async function convertBlobToWavUsingWebAudio(audioBlob) {
-  try {
-    const audioContext = new (AudioContext || webkitAudioContext)();
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    
-    // Convert AudioBuffer to WAV
-    const wavArrayBuffer = audioBufferToWav(audioBuffer);
-    const wavBlob = new Blob([wavArrayBuffer], { type: 'audio/wav' });
-    
-    console.log(`✅ WAV conversion successful: ${wavBlob.size} bytes`);
-    await audioContext.close();
-    
-    return wavBlob;
-  } catch (error) {
-    console.error('Web Audio API conversion failed:', error);
-    throw error;
-  }
-}
-
-// Request WAV conversion from content script
-async function requestWavConversionFromContentScript(audioBlob) {
-  console.log('🔄 Requesting WAV conversion from content script...');
-  
-  // Convert blob to Array for Chrome message passing
-  const arrayBuffer = await audioBlob.arrayBuffer();
-  const audioArray = Array.from(new Uint8Array(arrayBuffer));
-  
-  return new Promise((resolve, reject) => {
-    // Note: This would require implementing a message handler in content script
-    // For now, return null to indicate conversion not available
-    console.warn('Content script WAV conversion not implemented');
-    resolve(null);
-  });
-}
-
-// Simple AudioBuffer to WAV conversion
-function audioBufferToWav(buffer) {
-  const length = buffer.length;
-  const numberOfChannels = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const bitsPerSample = 16;
-  const bytesPerSample = bitsPerSample / 8;
-  const blockAlign = numberOfChannels * bytesPerSample;
-  const byteRate = sampleRate * blockAlign;
-  const dataSize = length * blockAlign;
-  const bufferSize = 44 + dataSize;
-  
-  const arrayBuffer = new ArrayBuffer(bufferSize);
-  const view = new DataView(arrayBuffer);
-  
-  // WAV header
-  const writeString = (offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
-  };
-  
-  writeString(0, 'RIFF');
-  view.setUint32(4, bufferSize - 8, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numberOfChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(36, 'data');
-  view.setUint32(40, dataSize, true);
-  
-  // Convert audio data
-  let offset = 44;
-  for (let i = 0; i < length; i++) {
-    for (let channel = 0; channel < numberOfChannels; channel++) {
-      const sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
-      view.setInt16(offset, sample * 0x7FFF, true);
-      offset += 2;
-    }
-  }
-  
-  return arrayBuffer;
-}
-
 /* =================================================================
                     VIDEO CONTENT ANALYSIS
    ================================================================= */
@@ -715,44 +524,14 @@ async function analyzeVideoContent(videoData) {
       hasAudio: !!videoData.audioBlob
     });
 
-    // Step 1: Transcribe audio with Whisper (with WAV conversion fallback)
-    let transcription;
-    
-    try {
-      transcription = await transcribeAudioWithWhisper(
-        videoData.audioBlob, 
-        { platform: videoData.platform, format: videoData.format, ...videoData.metadata }
-      );
-    } catch (error) {
-      if (error.message === 'NEEDS_WAV_CONVERSION') {
-        console.log('🔄 Audio format rejected by Whisper, attempting WAV conversion...');
-        
-        try {
-          // Attempt WAV conversion in service worker
-          console.log('🔄 Attempting WAV conversion in service worker...');
-          const wavBlob = await convertToWavInServiceWorker(videoData.audioBlob);
-          
-          if (wavBlob) {
-            console.log('✅ WAV conversion successful, retrying Whisper...');
-            transcription = await transcribeAudioWithWhisper(
-              wavBlob, 
-              { ...videoData, format: 'audio/wav', platform: videoData.platform }
-            );
-          } else {
-            throw new Error('WAV conversion returned null');
-          }
-        } catch (conversionError) {
-          console.error('WAV conversion failed:', conversionError);
-          console.warn('Falling back to metadata-only analysis');
-          const metadataAnalysis = await analyzeVideoMetadataOnly(videoData);
-          return metadataAnalysis;
-        }
-      } else {
-        console.error('Transcription failed:', error);
-        const metadataAnalysis = await analyzeVideoMetadataOnly(videoData);
-        return metadataAnalysis;
-      }
-    }
+    // Step 1: Transcribe audio with Whisper. transcribeAudioWithWhisper never
+    // throws - it returns { success: false } on failure. Problematic audio
+    // formats are already converted to WAV by the content script before they
+    // are sent here.
+    const transcription = await transcribeAudioWithWhisper(
+      videoData.audioBlob,
+      { platform: videoData.platform, format: videoData.format, ...videoData.metadata }
+    );
 
     if (!transcription.success) {
       console.warn('Audio transcription failed, falling back to metadata-only analysis:', transcription.error);
@@ -897,7 +676,10 @@ async function analyzeVideoContent(videoData) {
 // Function to analyze video transcript with GPT-4.1-nano
 async function analyzeVideoWithGPT(videoContent) {
   let timeoutId;
-  
+  // Declared outside the try block so the catch handler can localize its
+  // error response too (referencing it there used to throw a ReferenceError)
+  let isGerman = false;
+
   try {
     const { transcript, metadata, platform, duration, segments, language } = videoContent;
     
@@ -919,10 +701,10 @@ async function analyzeVideoWithGPT(videoContent) {
     }
     
     // Detect if content is German
-    const isGerman = language === 'german' || language === 'de' || 
-                     /[äöüß]/.test(transcript) || 
-                     /\b(der|die|das|und|ist|ein|eine|von|zu|auf|mit|für|sich|nicht|werden|kann|wird|sind|wurde|wurden)\b/i.test(transcript);
-    
+    isGerman = language === 'german' || language === 'de' ||
+               /[äöüß]/.test(transcript) ||
+               /\b(der|die|das|und|ist|ein|eine|von|zu|auf|mit|für|sich|nicht|werden|kann|wird|sind|wurde|wurden)\b/i.test(transcript);
+
     console.log(`Detected language: ${language || (isGerman ? 'German' : 'English')}, Transcript length: ${transcript.length}, Platform: ${platform}`);
     
     // Truncate if too long to avoid token limits  
@@ -1888,26 +1670,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (audioData) {
           try {
             // Handle different data types that might be passed
-            if (Array.isArray(audioData)) {
-              // THIS IS THE EXPECTED PATH NOW - Arrays serialize properly through Chrome messages
-              console.log('✅ Array detected, converting to Uint8Array then to blob');
-              console.log('Array length:', audioData.length);
-              
-              // Convert regular Array back to Uint8Array for blob creation
+            if (typeof audioData === 'string') {
+              // EXPECTED PATH: base64 string (compact and serializes cleanly
+              // through Chrome messages)
+              console.log('✅ Base64 string detected, decoding to blob');
+              const binary = atob(audioData);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+              }
+              audioBlob = new Blob([bytes], { type: message.data.audioType || 'audio/webm' });
+
+              console.log('✅ Decoded base64 audio, size:', bytes.byteLength, 'bytes');
+
+            } else if (Array.isArray(audioData)) {
+              // Legacy path: plain number array
+              console.log('⚠️ Array detected (legacy format), converting to Uint8Array then to blob');
               const uint8Array = new Uint8Array(audioData);
               audioBlob = new Blob([uint8Array], { type: message.data.audioType || 'audio/webm' });
-              
-              console.log('✅ Converted Array to Uint8Array, size:', uint8Array.byteLength, 'bytes');
-              
+
             } else if (audioData instanceof ArrayBuffer) {
-              console.log('⚠️ ArrayBuffer detected (unexpected - should be Array)');
+              console.log('⚠️ ArrayBuffer detected (unexpected - should be base64 string)');
               audioBlob = new Blob([audioData], { type: message.data.audioType || 'audio/webm' });
             } else if (audioData.buffer && audioData.byteLength !== undefined) {
-              console.log('⚠️ TypedArray detected (unexpected - should be Array)');
+              console.log('⚠️ TypedArray detected (unexpected - should be base64 string)');
               audioBlob = new Blob([audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength)], { type: message.data.audioType || 'audio/webm' });
             } else {
               console.warn('❌ Unknown audio data format:', typeof audioData, audioData?.constructor?.name);
-              console.log('Data sample:', audioData instanceof Object ? Object.keys(audioData) : audioData?.toString?.()?.substring(0, 100));
               throw new Error(`Unsupported audio data format: ${typeof audioData}`);
             }
             

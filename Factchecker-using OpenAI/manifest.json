@@ -1,14 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "AI Fact Checker",
+  "name": "AI Fact Checker for News & Videos",
   "version": "2.1",
   "description": "AI-powered fact-checking for news articles and video content using OpenAI Whisper, GPT-4.1-nano, and ClaimBuster.",
   "permissions": [
     "activeTab",
     "scripting",
     "tabs",
-    "storage",
-    "alarms"
+    "storage"
   ],
   "host_permissions": [
     "*://*.bild.de/*",

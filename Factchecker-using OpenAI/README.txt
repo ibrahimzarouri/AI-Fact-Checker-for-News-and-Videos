@@ -1,6 +1,6 @@
-FactChecker Chrome Extension
+AI Fact Checker for News & Videos - Chrome Extension
 
-Eine Chrome-Erweiterung zur Überprüfung von Fakten und Analyse von Artikeln mit OpenAI und ClaimBuster APIs.
+Eine Chrome-Erweiterung zur Überprüfung von Fakten und Analyse von Nachrichtenartikeln und Videos (YouTube/TikTok) mit OpenAI und ClaimBuster APIs.
 
 Installation der Erweiterung
 
